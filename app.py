@@ -30,19 +30,15 @@ bcrypt = Bcrypt(app)
 CORS(app, resources={r"/api/*": {"origins": "*"}}) # Enable CORS for all /api routes
 
 # Database connection details from environment variables
-DB_NAME = os.getenv('DB_NAME')
-DB_USER = os.getenv('DB_USER')
-DB_PASSWORD = os.getenv('DB_PASSWORD')
-DB_HOST = os.getenv('DB_HOST')
-DB_PORT = os.getenv('DB_PORT')
+DB_NAME='railway'
+DB_USER='postgres'
+DB_PASSWORD='YugfsjGfbcGvNRVpGtMFlJvsUtCwocba'
+DB_HOST='shuttle.proxy.rlwy.net'
+DB_PORT='21426'
 
 # --- Configuration for Heatmap Data ---
 BASE_JSON_DIR = os.getenv('APP_BASE_JSON_DIR', 'json/')
 CSV_POINTS_PATH = "https://github.com/Ved-Dixit/GoMedCamp/releases/download/coordinates/Ind_adm2_Points.csv"
-ENV_CSV_STATE_COL = os.getenv('APP_CSV_STATE_COL')
-ENV_CSV_DISTRICT_COL = os.getenv('APP_CSV_DISTRICT_COL')
-ENV_CSV_LAT_COL = os.getenv('APP_CSV_LAT_COL')
-ENV_CSV_LON_COL = os.getenv('APP_CSV_LON_COL')
 
 # --- Configuration for AI Chatbot and Translation ---
 HF_API_TOKEN = os.getenv('HF_API_TOKEN') # Kept for completeness, not used by local models
