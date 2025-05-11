@@ -47,7 +47,7 @@ DB_PORT="21426"
 
 # --- Configuration for Heatmap Data ---
 BASE_JSON_DIR = "https://github.com/Ved-Dixit/GoMedCamp/releases/download/info/json.zip"
-CSV_POINTS_PATH = os.getenv('APP_CSV_POINTS_PATH', 'Ind_adm2_Points.csv')
+CSV_POINTS_PATH = "https://github.com/Ved-Dixit/GoMedCamp/releases/download/coordinates/Ind_adm2_Points.csv"
 # --- ADDED CSV Column Environment Variables ---
 ENV_CSV_STATE_COL = os.getenv('APP_CSV_STATE_COL')
 ENV_CSV_DISTRICT_COL = os.getenv('APP_CSV_DISTRICT_COL')
