@@ -12,7 +12,7 @@ import logging # For configuring logging
 import numpy as np # Import numpy for type checking if needed, or just cast
 from math import radians, sin, cos, sqrt, atan2 # For Haversine distance (optional future use)
 from datetime import datetime # Added for timestamping
-# import requests # No longer needed if Lingva is fully replaced
+import zipfile # <--- ADDED FOR ZIP FILE HANDLING
 
 # --- Import for local Hugging Face models (chatbot and translation) ---
 from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
@@ -30,15 +30,21 @@ bcrypt = Bcrypt(app)
 CORS(app, resources={r"/api/*": {"origins": "*"}}) # Enable CORS for all /api routes
 
 # Database connection details from environment variables
-DB_NAME='railway'
-DB_USER='postgres'
-DB_PASSWORD='YugfsjGfbcGvNRVpGtMFlJvsUtCwocba'
-DB_HOST='shuttle.proxy.rlwy.net'
-DB_PORT='21426'
+DB_NAME="railway"
+DB_USER="postgres"
+DB_PASSWORD="YugfsjGfbcGvNRVpGtMFlJvsUtCwocba"
+DB_HOST="shuttle.proxy.rlwy.net"
+DB_PORT="21426"
 
 # --- Configuration for Heatmap Data ---
 BASE_JSON_DIR = os.getenv('APP_BASE_JSON_DIR', 'json/')
-CSV_POINTS_PATH = "https://github.com/Ved-Dixit/GoMedCamp/releases/download/coordinates/Ind_adm2_Points.csv"
+CSV_POINTS_PATH = os.getenv('APP_CSV_POINTS_PATH', 'Ind_adm2_Points.csv')
+# --- ADDED CSV Column Environment Variables ---
+ENV_CSV_STATE_COL = os.getenv('APP_CSV_STATE_COL')
+ENV_CSV_DISTRICT_COL = os.getenv('APP_CSV_DISTRICT_COL')
+ENV_CSV_LAT_COL = os.getenv('APP_CSV_LAT_COL')
+ENV_CSV_LON_COL = os.getenv('APP_CSV_LON_COL')
+
 
 # --- Configuration for AI Chatbot and Translation ---
 HF_API_TOKEN = os.getenv('HF_API_TOKEN') # Kept for completeness, not used by local models
@@ -123,9 +129,6 @@ def initialize_local_translation_model():
     
     try:
         app.logger.info(f"Attempting to initialize local TRANSLATION pipeline for model: {HF_TRANSLATION_MODEL_ID}...")
-        # For NLLB, the task is "translation" but we specify src_lang and tgt_lang during the call
-        # The pipeline can be initialized with the model name directly.
-        # The tokenizer is loaded automatically by the pipeline.
         local_translation_pipeline = pipeline("translation", model=HF_TRANSLATION_MODEL_ID)
         LOCAL_TRANSLATION_MODEL_INIT_STATUS = "success"
         app.logger.info(f"Local TRANSLATION pipeline for {HF_TRANSLATION_MODEL_ID} initialized successfully.")
@@ -222,7 +225,6 @@ def create_tables():
                     );
                 """)
                 
-                # Explicitly ALTER TABLE to ensure columns are nullable if table already existed with NOT NULL constraints
                 try:
                     cur.execute("ALTER TABLE patients ALTER COLUMN camp_id DROP NOT NULL;")
                     app.logger.info("Ensured 'camp_id' column in 'patients' table is nullable.")
@@ -385,7 +387,7 @@ def create_tables():
     else:
         app.logger.error("Could not create/alter tables due to failed database connection.")
 
-# --- Heatmap Helper Functions (Existing - Unchanged) ---
+# --- Heatmap Helper Functions ---
 def standardize_name(name):
     if not isinstance(name, str):
         try: name = str(name)
@@ -396,44 +398,134 @@ def standardize_name(name):
     return ' '.join(processed_name.split())
 
 def load_indicator_data_for_state(state_name_url_case, indicator_id_req):
-    state_json_path = os.path.join(BASE_JSON_DIR, state_name_url_case)
-    if not os.path.isdir(state_json_path):
-        app.logger.warning(f"State JSON directory not found: {state_json_path}")
-        return None, f"Indicator ID {indicator_id_req}" 
+    # state_name_url_case is like 'uttar_pradesh' (standardized and underscore-separated)
+    # indicator_id_req is the indicator ID string
+    
     all_district_data = []
-    full_indicator_name_text = f"Indicator ID {indicator_id_req}" 
-    for filename in os.listdir(state_json_path):
-        if filename.endswith('.json'):
-            district_name_from_file = standardize_name(filename.replace('.json', ''))
-            if not district_name_from_file: continue
-            filepath = os.path.join(state_json_path, filename)
-            try:
-                with open(filepath, 'r', encoding='utf-8') as f: data = json.load(f)
-                indicator_info = data.get('indicators', {}).get(indicator_id_req)
-                if indicator_info:
-                    value = indicator_info.get('value')
-                    current_indicator_text = indicator_info.get('indicator', full_indicator_name_text)
-                    if indicator_id_req in current_indicator_text:
-                        name_part = current_indicator_text.split(indicator_id_req, 1)[-1].strip()
-                        if name_part.startswith((".", ")", ":")): name_part = name_part[1:].strip()
-                        full_indicator_name_text = name_part if name_part else current_indicator_text
-                    else: full_indicator_name_text = current_indicator_text
-                    all_district_data.append({
-                        'district_standardized': district_name_from_file,
-                        'value': pd.to_numeric(value, errors='coerce'),
-                        'indicator_name_text': full_indicator_name_text 
-                    })
-            except Exception as e: app.logger.error(f"Error processing {filename}: {e}")
-    if not all_district_data: return None, full_indicator_name_text
+    full_indicator_name_text = f"Indicator ID {indicator_id_req}"
+
+    # Check if BASE_JSON_DIR points to a ZIP file
+    if os.path.isfile(BASE_JSON_DIR) and BASE_JSON_DIR.lower().endswith('.zip'):
+        app.logger.info(f"Attempting to load indicator data from ZIP archive: {BASE_JSON_DIR}")
+        try:
+            with zipfile.ZipFile(BASE_JSON_DIR, 'r') as zf:
+                # Construct the path prefix for files within the zip for the given state
+                # e.g., 'uttar_pradesh/' (ensuring forward slashes for zip paths)
+                state_path_prefix_in_zip = state_name_url_case.replace(os.path.sep, '/') + '/'
+                
+                # List files in the zip that are under the state's path and are .json files
+                # and are directly in that state folder (not sub-sub-folders)
+                candidate_files = [
+                    name for name in zf.namelist() 
+                    if name.startswith(state_path_prefix_in_zip) and \
+                       name.lower().endswith('.json') and \
+                       name.count('/') == state_path_prefix_in_zip.count('/') 
+                ]
+                
+                if not candidate_files:
+                    app.logger.warning(f"No JSON files found for state '{state_name_url_case}' (path prefix '{state_path_prefix_in_zip}') in ZIP archive {BASE_JSON_DIR}")
+                    return None, full_indicator_name_text
+
+                for filepath_in_zip in candidate_files:
+                    # Extract district name from the filename part of filepath_in_zip
+                    filename_part = filepath_in_zip.split('/')[-1] # e.g., 'agra.json'
+                    district_name_from_file = standardize_name(filename_part.replace('.json', ''))
+                    if not district_name_from_file: continue
+
+                    try:
+                        # Read file content from zip as bytes and decode to string for json.loads
+                        json_content_bytes = zf.read(filepath_in_zip)
+                        data = json.loads(json_content_bytes.decode('utf-8')) # Assuming UTF-8
+
+                        indicator_info = data.get('indicators', {}).get(indicator_id_req)
+                        if indicator_info:
+                            value = indicator_info.get('value')
+                            current_indicator_text = indicator_info.get('indicator', full_indicator_name_text)
+                            if indicator_id_req in current_indicator_text:
+                                name_part = current_indicator_text.split(indicator_id_req, 1)[-1].strip()
+                                if name_part.startswith((".", ")", ":")): name_part = name_part[1:].strip()
+                                full_indicator_name_text = name_part if name_part else current_indicator_text
+                            else: full_indicator_name_text = current_indicator_text
+                            
+                            all_district_data.append({
+                                'district_standardized': district_name_from_file,
+                                'value': pd.to_numeric(value, errors='coerce'),
+                                'indicator_name_text': full_indicator_name_text 
+                            })
+                    except json.JSONDecodeError as jde:
+                        app.logger.error(f"Error decoding JSON from {filepath_in_zip} in {BASE_JSON_DIR}: {jde}")
+                    except Exception as e_file:
+                        app.logger.error(f"Error processing file {filepath_in_zip} from ZIP {BASE_JSON_DIR}: {e_file}")
+        
+        except zipfile.BadZipFile:
+            app.logger.error(f"Bad ZIP file: {BASE_JSON_DIR}")
+            return None, full_indicator_name_text
+        except FileNotFoundError:
+            app.logger.error(f"ZIP file not found: {BASE_JSON_DIR}")
+            return None, full_indicator_name_text
+        except Exception as e_zip:
+            app.logger.error(f"Error reading ZIP file {BASE_JSON_DIR}: {e_zip}", exc_info=True)
+            return None, full_indicator_name_text
+
+    else: # Original logic for directory-based JSONs
+        state_json_path = os.path.join(BASE_JSON_DIR, state_name_url_case)
+        if not os.path.isdir(state_json_path):
+            app.logger.warning(f"State JSON directory not found (and BASE_JSON_DIR is not a zip): {state_json_path}")
+            return None, f"Indicator ID {indicator_id_req}" 
+        
+        app.logger.info(f"Loading indicator data from directory: {state_json_path}")
+        for filename in os.listdir(state_json_path):
+            if filename.endswith('.json'):
+                district_name_from_file = standardize_name(filename.replace('.json', ''))
+                if not district_name_from_file: continue
+                filepath = os.path.join(state_json_path, filename)
+                try:
+                    with open(filepath, 'r', encoding='utf-8') as f: 
+                        data = json.load(f)
+                    
+                    indicator_info = data.get('indicators', {}).get(indicator_id_req)
+                    if indicator_info:
+                        value = indicator_info.get('value')
+                        current_indicator_text = indicator_info.get('indicator', full_indicator_name_text)
+                        if indicator_id_req in current_indicator_text:
+                            name_part = current_indicator_text.split(indicator_id_req, 1)[-1].strip()
+                            if name_part.startswith((".", ")", ":")): name_part = name_part[1:].strip()
+                            full_indicator_name_text = name_part if name_part else current_indicator_text
+                        else: full_indicator_name_text = current_indicator_text
+                        
+                        all_district_data.append({
+                            'district_standardized': district_name_from_file,
+                            'value': pd.to_numeric(value, errors='coerce'),
+                            'indicator_name_text': full_indicator_name_text 
+                        })
+                except Exception as e: 
+                    app.logger.error(f"Error processing file {filepath} from directory: {e}", exc_info=True)
+
+    # Common processing part (after data is loaded either from zip or directory)
+    if not all_district_data: 
+        app.logger.info(f"No district data loaded for state '{state_name_url_case}', indicator '{indicator_id_req}'.")
+        return None, full_indicator_name_text
+    
     df_indicators = pd.DataFrame(all_district_data)
-    if df_indicators.empty: return None, full_indicator_name_text
+    if df_indicators.empty: 
+        return None, full_indicator_name_text
+    
     df_indicators.dropna(subset=['value'], inplace=True)
-    if df_indicators.empty: return None, full_indicator_name_text
+    if df_indicators.empty: 
+        return None, full_indicator_name_text
+    
     if 'indicator_name_text' in df_indicators.columns and not df_indicators.empty:
+        # Consolidate indicator name from the most frequent one, or the first one if no clear mode
         common_name = df_indicators['indicator_name_text'].mode()
-        full_indicator_name_text = common_name[0] if not common_name.empty else df_indicators['indicator_name_text'].iloc[0]
+        if not common_name.empty:
+            full_indicator_name_text = common_name[0]
+        elif not df_indicators['indicator_name_text'].empty: # Fallback to first if no mode
+            full_indicator_name_text = df_indicators['indicator_name_text'].iloc[0]
+        # Ensure all rows have the same consolidated indicator name
         df_indicators['indicator_name_text'] = full_indicator_name_text
+        
     return df_indicators, full_indicator_name_text
+
 
 def _get_column_name(df_columns, env_var_value, possible_names_list, column_type_name, csv_path_for_logging):
     env_var_key_name = f'APP_CSV_{column_type_name.upper().replace(" ", "_")}_COL'
@@ -463,33 +555,35 @@ def load_geographic_data_from_csv(state_name_standardized_filter):
         except Exception as e: app.logger.error(f"Error loading geographic CSV {CSV_POINTS_PATH} with '{enc}': {e}"); return None, None
     if df_all_geo_points is None: app.logger.error(f"Failed to load geographic CSV {CSV_POINTS_PATH} with tried encodings."); return None, None
     
-    CSV_STATE_NAME_COL = _get_column_name(df_all_geo_points.columns, ENV_CSV_STATE_COL, ['State_Name', 'state_name', 'State', 'state', 'NAME_1', 'ADM1_EN', 'ST_NM'], "state name", CSV_POINTS_PATH)
-    if not CSV_STATE_NAME_COL: return None, None
-    df_all_geo_points['state_standardized_csv'] = df_all_geo_points[CSV_STATE_NAME_COL].astype(str).apply(standardize_name)
+    # Use the globally defined ENV_CSV_... variables
+    current_csv_state_col = _get_column_name(df_all_geo_points.columns, ENV_CSV_STATE_COL, ['State_Name', 'state_name', 'State', 'state', 'NAME_1', 'ADM1_EN', 'ST_NM'], "state name", CSV_POINTS_PATH)
+    if not current_csv_state_col: return None, None
+    df_all_geo_points['state_standardized_csv'] = df_all_geo_points[current_csv_state_col].astype(str).apply(standardize_name)
     df_state_geo_points = df_all_geo_points[df_all_geo_points['state_standardized_csv'] == state_name_standardized_filter].copy()
     if df_state_geo_points.empty: app.logger.warning(f"No geographic data for state '{state_name_standardized_filter}' in {CSV_POINTS_PATH}."); return None, None
 
-    CSV_DISTRICT_NAME_COL = _get_column_name(df_state_geo_points.columns, ENV_CSV_DISTRICT_COL, ['District_Name', 'district_name', 'District', 'district', 'NAME_2', 'ADM2_EN', 'dt_name', 'Dist_Name'], "district name", CSV_POINTS_PATH)
-    if not CSV_DISTRICT_NAME_COL: return None, None
-    CSV_LAT_COL = _get_column_name(df_state_geo_points.columns, ENV_CSV_LAT_COL, ['Latitude', 'latitude', 'Lat', 'lat', 'Y', 'y_coord'], "latitude", CSV_POINTS_PATH)
-    if not CSV_LAT_COL: return None, None
-    CSV_LON_COL = _get_column_name(df_state_geo_points.columns, ENV_CSV_LON_COL, ['Longitude', 'longitude', 'Lon', 'lon', 'X', 'x_coord'], "longitude", CSV_POINTS_PATH)
-    if not CSV_LON_COL: return None, None
+    current_csv_district_col = _get_column_name(df_state_geo_points.columns, ENV_CSV_DISTRICT_COL, ['District_Name', 'district_name', 'District', 'district', 'NAME_2', 'ADM2_EN', 'dt_name', 'Dist_Name'], "district name", CSV_POINTS_PATH)
+    if not current_csv_district_col: return None, None
+    current_csv_lat_col = _get_column_name(df_state_geo_points.columns, ENV_CSV_LAT_COL, ['Latitude', 'latitude', 'Lat', 'lat', 'Y', 'y_coord'], "latitude", CSV_POINTS_PATH)
+    if not current_csv_lat_col: return None, None
+    current_csv_lon_col = _get_column_name(df_state_geo_points.columns, ENV_CSV_LON_COL, ['Longitude', 'longitude', 'Lon', 'lon', 'X', 'x_coord'], "longitude", CSV_POINTS_PATH)
+    if not current_csv_lon_col: return None, None
 
-    df_state_geo_points[CSV_LAT_COL] = pd.to_numeric(df_state_geo_points[CSV_LAT_COL], errors='coerce')
-    df_state_geo_points[CSV_LON_COL] = pd.to_numeric(df_state_geo_points[CSV_LON_COL], errors='coerce')
-    df_state_geo_points.dropna(subset=[CSV_LAT_COL, CSV_LON_COL], inplace=True)
+    df_state_geo_points[current_csv_lat_col] = pd.to_numeric(df_state_geo_points[current_csv_lat_col], errors='coerce')
+    df_state_geo_points[current_csv_lon_col] = pd.to_numeric(df_state_geo_points[current_csv_lon_col], errors='coerce')
+    df_state_geo_points.dropna(subset=[current_csv_lat_col, current_csv_lon_col], inplace=True)
     if df_state_geo_points.empty: app.logger.warning(f"No valid lat/lon data for state '{state_name_standardized_filter}'."); return None, None
     
     try:
-        geometry = gpd.points_from_xy(df_state_geo_points[CSV_LON_COL], df_state_geo_points[CSV_LAT_COL])
-        cols_to_keep = [col for col in [CSV_DISTRICT_NAME_COL, CSV_STATE_NAME_COL] if col in df_state_geo_points.columns]
+        geometry = gpd.points_from_xy(df_state_geo_points[current_csv_lon_col], df_state_geo_points[current_csv_lat_col])
+        cols_to_keep = [col for col in [current_csv_district_col, current_csv_state_col] if col in df_state_geo_points.columns]
         gdf_districts = gpd.GeoDataFrame(df_state_geo_points[cols_to_keep], geometry=geometry, crs="EPSG:4326")
-    except Exception as e: app.logger.error(f"Error creating GeoDataFrame for state '{state_name_standardized_filter}': {e}"); return None, CSV_DISTRICT_NAME_COL
-    gdf_districts['district_standardized_geo'] = gdf_districts[CSV_DISTRICT_NAME_COL].astype(str).apply(standardize_name)
+    except Exception as e: app.logger.error(f"Error creating GeoDataFrame for state '{state_name_standardized_filter}': {e}"); return None, current_csv_district_col
+    gdf_districts['district_standardized_geo'] = gdf_districts[current_csv_district_col].astype(str).apply(standardize_name)
     gdf_districts = gdf_districts[gdf_districts['district_standardized_geo'] != ""]
-    if gdf_districts.empty: app.logger.warning(f"GeoDataFrame for state '{state_name_standardized_filter}' empty after removing empty standardized district names."); return None, CSV_DISTRICT_NAME_COL
-    return gdf_districts, CSV_DISTRICT_NAME_COL
+    if gdf_districts.empty: app.logger.warning(f"GeoDataFrame for state '{state_name_standardized_filter}' empty after removing empty standardized district names."); return None, current_csv_district_col
+    return gdf_districts, current_csv_district_col
+
 
 # --- Haversine Distance (Existing - Unchanged) ---
 def haversine(lat1, lon1, lat2, lon2):
@@ -527,9 +621,9 @@ def signup():
     if not request.is_json:
         return jsonify({"error": "Missing JSON in request"}), 400
     data = request.get_json()
-    username = data.get('username') # This is 'name' from frontend form
+    username = data.get('username') 
     email = data.get('email')
-    phone_number = data.get('phone_number') # This is 'phoneNumber' from frontend form
+    phone_number = data.get('phone_number') 
     password = data.get('password')
     user_type = data.get('userType')
     address = data.get('address')
@@ -555,7 +649,6 @@ def signup():
             if cur.fetchone():
                 return jsonify({"error": "User with this username, email, or phone number already exists."}), 409
             
-            # Insert into users table
             sql_user_insert = """
                 INSERT INTO users (username, email, phone_number, password_hash, user_type, address) 
                 VALUES (%s, %s, %s, %s, %s, %s) RETURNING id, username, email, user_type, address, created_at;
@@ -566,7 +659,6 @@ def signup():
             if new_user_raw:
                 new_user_id = new_user_raw['id']
                 
-                # MODIFICATION: If the new user is a 'requester', create a basic patient profile
                 if user_type == 'requester':
                     try:
                         app.logger.info(f"[signup] New user is a requester (User ID: {new_user_id}). Creating a basic patient record.")
@@ -646,11 +738,13 @@ def get_heatmap_data():
     indicator_data_summary = {"count": int(len(df_indicators)) if df_indicators is not None else 0, "available": df_indicators is not None and not df_indicators.empty}
     if not indicator_data_summary["available"]:
         return jsonify({"type": "FeatureCollection", "features": [], "metadata": {"query_state": state_name_req, "query_indicator_id": indicator_id_req, "full_indicator_name": full_indicator_name, "message": f"No indicator data for state '{state_name_req}', ID '{indicator_id_req}'.", "indicator_data_summary": indicator_data_summary, "geographic_data_summary": {"available": False, "count": 0, "message": "Geographic data not loaded."}}}), 200
+    
     gdf_state_districts, csv_district_col_name = load_geographic_data_from_csv(state_name_standardized_filter)
     geographic_data_summary = {"count": int(len(gdf_state_districts)) if gdf_state_districts is not None else 0, "available": gdf_state_districts is not None and not gdf_state_districts.empty, "message": ""}
     if not geographic_data_summary["available"]:
         geographic_data_summary["message"] = f"Geographic point data not found for state '{state_name_req}'."
         return jsonify({"type": "FeatureCollection", "features": [], "metadata": {"query_state": state_name_req, "query_indicator_id": indicator_id_req, "full_indicator_name": full_indicator_name, "message": geographic_data_summary["message"], "indicator_data_summary": indicator_data_summary, "geographic_data_summary": geographic_data_summary}}), 200
+    
     merged_gdf = gdf_state_districts.merge(df_indicators, left_on='district_standardized_geo', right_on='district_standardized', how='left')
     merged_gdf['value'] = pd.to_numeric(merged_gdf['value'], errors='coerce')
     matched_count = int(merged_gdf['value'].notna().sum().item()) if isinstance(merged_gdf['value'].notna().sum(), np.generic) else int(merged_gdf['value'].notna().sum())
@@ -660,6 +754,7 @@ def get_heatmap_data():
     for _, row in merged_gdf.iterrows():
         properties = {'original_csv_district_name': row.get(csv_district_col_name, "N/A") if pd.notna(row.get(csv_district_col_name)) else "N/A", 'district_standardized_geo': row['district_standardized_geo'], 'value': None if pd.isna(row['value']) else float(row['value']), 'indicator_id': indicator_id_req, 'indicator_name': full_indicator_name}
         if row['geometry'] and not row['geometry'].is_empty: features_list.append({"type": "Feature", "properties": properties, "geometry": gpd.GeoSeries([row['geometry']]).__geo_interface__['features'][0]['geometry']})
+    
     final_message = f"Retrieved data for {len(features_list)} points." if features_list else "No points found/matched."
     response_geojson = {"type": "FeatureCollection", "crs": {"type": "name", "properties": {"name": "urn:ogc:def:crs:OGC:1.3:CRS84"}}, "features": features_list, "metadata": {"query_state": state_name_req, "query_indicator_id": indicator_id_req, "full_indicator_name": full_indicator_name, "message": final_message, "indicator_data_summary": indicator_data_summary, "geographic_data_summary": geographic_data_summary, "merge_summary": {"geo_districts_count": geographic_data_summary["count"], "indicator_districts_count": indicator_data_summary["count"], "matched_districts_count": matched_count, "unmatched_geo_districts_sample": unmatched_geo_districts[:5], "unmatched_indicator_districts_sample": unmatched_indicator_districts[:5]}}}
     return jsonify(response_geojson), 200
@@ -814,7 +909,6 @@ def delete_camp_endpoint(camp_id):
     if not conn: return jsonify({"error": "Database connection failed"}), 500
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            # Verify user is an organizer
             cur.execute("SELECT user_type FROM users WHERE id = %s", (requesting_organizer_id,))
             user_check = cur.fetchone()
             if not user_check or user_check['user_type'] != 'organizer':
@@ -1202,7 +1296,6 @@ def get_my_patient_details():
     finally:
         if conn: conn.close()
 
-# --- Local Organisation and Chat Endpoints (Existing - Unchanged) ---
 @app.route('/api/local-organisations', methods=['GET'])
 def get_local_organisations():
     conn = get_db_connection()
@@ -1594,7 +1687,6 @@ def send_chat_message(connection_id):
     finally:
         if conn: conn.close()
 
-# --- NEW: Local Hugging Face Translation Function ---
 def translate_text_local_hf(text, target_lang_simple, source_lang_simple="auto"):
     global local_translation_pipeline, LOCAL_TRANSLATION_MODEL_INIT_STATUS, LANGUAGE_CODE_MAP_NLLB
 
@@ -1604,28 +1696,39 @@ def translate_text_local_hf(text, target_lang_simple, source_lang_simple="auto")
 
     if LOCAL_TRANSLATION_MODEL_INIT_STATUS == "failed" or local_translation_pipeline is None:
         app.logger.error(f"Local translation model ({HF_TRANSLATION_MODEL_ID}) is not available or failed to initialize.")
-        return text # Return original text if translation model failed
+        return text 
 
     if not text or not text.strip():
         app.logger.warning("translate_text_local_hf: Received empty text, returning as is.")
         return text
 
-    # Map simple language codes to NLLB specific codes
     nllb_target_lang = LANGUAGE_CODE_MAP_NLLB.get(target_lang_simple)
     nllb_source_lang = None
 
     if source_lang_simple == "auto":
-        # NLLB requires src_lang. If 'auto', we need a strategy.
-        # For chatbot: if translating user message TO 'en', source is user's language.
-        # If translating bot message FROM 'en', source is 'en'.
-        # This function is now more general, so 'auto' is harder.
-        # For now, if 'auto' and target is 'en', we can't know source.
-        # If 'auto' and target is NOT 'en', assume source is 'en'.
         if target_lang_simple == "en":
-            app.logger.warning(f"translate_text_local_hf: 'auto' source language specified for target 'en'. NLLB requires explicit source. Cannot translate.")
-            return text # Or raise an error
-        else: # Assume source is English if auto and target is not English
-            nllb_source_lang = LANGUAGE_CODE_MAP_NLLB.get("en")
+            app.logger.warning(f"translate_text_local_hf: 'auto' source language specified for target 'en'. NLLB requires explicit source. Cannot translate if source is unknown.")
+            # Attempt to guess common languages or default to English if it's a common scenario
+            # For now, we'll be strict. If you need auto-detection, a more sophisticated strategy is needed.
+            # One option: try translating from a few common languages and see which one "makes sense" or use a language detection library.
+            # For this implementation, if source is 'auto' and target is 'en', we might need to know the user's actual language.
+            # Let's assume if source is 'auto' and target is 'en', the source_lang_simple should have been the actual user language.
+            # This part of logic might need refinement based on how 'auto' is intended to be used.
+            # For now, if source_lang_simple is 'auto' and target is 'en', we cannot reliably pick an NLLB source.
+            # However, if the calling context (e.g., patient_chatbot) knows the user's language, it should pass it.
+            # If it's truly 'auto' from an unknown source to 'en', this is problematic for NLLB.
+            # Let's assume for now 'auto' means "the user's language, which I (the caller) should have specified".
+            # If this function is called with source_lang_simple='auto' and target_lang_simple='en' without more context,
+            # it implies a design gap.
+            # A simple fallback: if source is 'auto' and target is 'en', and we don't have the actual source, we can't proceed.
+            # Let's refine this: if source_lang_simple is 'auto', it means the CALLER doesn't know.
+            # The NLLB model itself doesn't do 'auto' source detection in the same way some APIs do.
+            # So, we must provide a src_lang.
+            # If target is 'en', we can't assume source. If target is NOT 'en', we often assume source IS 'en'.
+            app.logger.error(f"translate_text_local_hf: 'auto' source language to 'en' target is ambiguous for NLLB. Please specify source language.")
+            return text # Cannot translate without a source language for NLLB
+        else: 
+            nllb_source_lang = LANGUAGE_CODE_MAP_NLLB.get("en") # Assume source is English
             app.logger.info(f"translate_text_local_hf: 'auto' source, assuming 'en' ({nllb_source_lang}) as source for target '{target_lang_simple}'.")
     else:
         nllb_source_lang = LANGUAGE_CODE_MAP_NLLB.get(source_lang_simple)
@@ -1633,16 +1736,15 @@ def translate_text_local_hf(text, target_lang_simple, source_lang_simple="auto")
     if not nllb_target_lang:
         app.logger.error(f"Unsupported target language for NLLB: '{target_lang_simple}'. Check LANGUAGE_CODE_MAP_NLLB.")
         return text
-    if not nllb_source_lang:
-        app.logger.error(f"Unsupported source language for NLLB: '{source_lang_simple}'. Check LANGUAGE_CODE_MAP_NLLB.")
+    if not nllb_source_lang: # This case should be less common if 'auto' defaults to 'en' source for non-'en' targets.
+        app.logger.error(f"Unsupported or unspecified source language for NLLB: '{source_lang_simple}'. Check LANGUAGE_CODE_MAP_NLLB.")
         return text
     
     if nllb_source_lang == nllb_target_lang:
-        return text # No translation needed
+        return text 
 
     try:
         app.logger.info(f"Attempting local translation from {nllb_source_lang} to {nllb_target_lang} for text: '{text[:50]}...'")
-        # NLLB pipeline call:
         result = local_translation_pipeline(text, src_lang=nllb_source_lang, tgt_lang=nllb_target_lang)
         
         if result and isinstance(result, list) and result[0] and "translation_text" in result[0]:
@@ -1656,8 +1758,6 @@ def translate_text_local_hf(text, target_lang_simple, source_lang_simple="auto")
         app.logger.error(f"Error during local NLLB translation: {e}", exc_info=True)
         return text
 
-
-# --- AI Chatbot Helper Function (Local Hugging Face Model) ---
 def query_huggingface_model_local(prompt_text):
     global local_chatbot_pipeline, local_chatbot_tokenizer, LOCAL_CHATBOT_MODEL_INIT_STATUS
 
@@ -1678,7 +1778,15 @@ def query_huggingface_model_local(prompt_text):
         max_new_tokens = 150 
         calculated_max_length = prompt_length + max_new_tokens
 
-        model_max_seq_len = local_chatbot_pipeline.model.config.max_position_embeddings
+        # Ensure model_max_seq_len is accessed correctly
+        if hasattr(local_chatbot_pipeline.model.config, 'max_position_embeddings'):
+            model_max_seq_len = local_chatbot_pipeline.model.config.max_position_embeddings
+        elif hasattr(local_chatbot_pipeline.model.config, 'n_positions'): # Fallback for some models like GPT-2
+            model_max_seq_len = local_chatbot_pipeline.model.config.n_positions
+        else:
+            app.logger.warning(f"Could not determine max_position_embeddings for model {HF_CHATBOT_MODEL_ID}. Using a default of 512.")
+            model_max_seq_len = 512 
+
         if calculated_max_length > model_max_seq_len:
             calculated_max_length = model_max_seq_len
             app.logger.warning(f"Calculated max_length ({prompt_length + max_new_tokens}) exceeded model max sequence length ({model_max_seq_len}). Truncating to {calculated_max_length}.")
@@ -1700,10 +1808,11 @@ def query_huggingface_model_local(prompt_text):
                 bot_response = full_generated_text[len(prompt_text):].strip()
             else:
                  app.logger.warning(f"Generated text from local model did not start with the exact prompt. Prompt: '{prompt_text[:50]}...', Generated: '{full_generated_text[:100]}...' Using heuristic to strip prompt.")
-                 if "Assistant:" in full_generated_text:
+                 if "Assistant:" in full_generated_text: # Check if model adds "Assistant:"
                      parts = full_generated_text.split("Assistant:", 1)
                      if len(parts) > 1:
                          bot_response = parts[1].strip()
+                 # Add other heuristics if needed based on model behavior
 
             app.logger.info(f"Local model {HF_CHATBOT_MODEL_ID} response successfully retrieved: '{bot_response[:100]}...'")
             return bot_response
@@ -1715,7 +1824,6 @@ def query_huggingface_model_local(prompt_text):
         app.logger.error(f"An unexpected error occurred while querying local Hugging Face model {HF_CHATBOT_MODEL_ID}: {e}", exc_info=True)
         return "An error occurred while communicating with the local chatbot model."
 
-# --- Patient Chatbot, Feedback, and Translation Endpoints ---
 @app.route('/api/translate', methods=['POST'])
 def translate_api_endpoint():
     user_id_str = request.headers.get('X-User-Id') 
@@ -1723,24 +1831,23 @@ def translate_api_endpoint():
         return jsonify({"error": "Missing JSON in request"}), 400
     data = request.get_json()
     text_to_translate = data.get('text')
-    target_lang_simple = data.get('target_lang') # e.g., 'hi'
-    source_lang_simple = data.get('source_lang', 'auto') # e.g., 'en' or 'auto'
+    target_lang_simple = data.get('target_lang') 
+    source_lang_simple = data.get('source_lang', 'auto') 
 
     if not text_to_translate or not target_lang_simple:
         return jsonify({"error": "Missing 'text' or 'target_lang'"}), 400
 
-    # --- UPDATED to use local HF translation ---
     translated_text = translate_text_local_hf(text_to_translate, target_lang_simple, source_lang_simple)
     
     detected_source_for_response = source_lang_simple
-    if source_lang_simple == 'auto' and LANGUAGE_CODE_MAP_NLLB.get(target_lang_simple) != LANGUAGE_CODE_MAP_NLLB.get("en"):
-        # If auto was used and we assumed English source because target wasn't English
-        detected_source_for_response = "en (assumed)"
-    elif source_lang_simple == 'auto':
-        detected_source_for_response = "auto (detection not implemented for NLLB, source must be explicit or assumed)"
-
-
-    if translated_text == text_to_translate and target_lang_simple != source_lang_simple : 
+    if source_lang_simple == 'auto':
+        if target_lang_simple == "en":
+            detected_source_for_response = "auto (source to 'en' requires explicit source_lang for NLLB)"
+        else: # Assumed 'en' as source
+            detected_source_for_response = "en (assumed)"
+    
+    if translated_text == text_to_translate and target_lang_simple != source_lang_simple and source_lang_simple != 'auto': 
+        # Log warning only if source was explicit and different from target, and no change occurred
         app.logger.warning(f"Local translation from '{source_lang_simple}' to '{target_lang_simple}' for '{text_to_translate[:50]}...' might have failed or text was identical, returning original.")
     
     return jsonify({"translated_text": translated_text, "source_lang_detected": detected_source_for_response}), 200
@@ -1760,7 +1867,7 @@ def patient_chatbot():
         return jsonify({"error": "Missing JSON in request"}), 400
     data = request.get_json()
     user_message = data.get('message')
-    target_language_simple = data.get('language', 'en') # User's language, e.g., 'hi'
+    target_language_simple = data.get('language', 'en') 
     patient_record_id = data.get('patient_record_id') 
 
     if not user_message:
@@ -1805,13 +1912,12 @@ def patient_chatbot():
         if conn: conn.close()
     
     message_for_bot = user_message
+    # Translate user message to English for the bot, if not already in English
     if target_language_simple != 'en':
         app.logger.info(f"Translating user message from '{target_language_simple}' to 'en' for bot. Original: '{user_message[:100]}...'")
-        # --- UPDATED to use local HF translation ---
         message_for_bot = translate_text_local_hf(user_message, "en", target_language_simple) # target='en', source=user's lang
-        if message_for_bot == user_message and target_language_simple != "en":
+        if message_for_bot == user_message: # If translation didn't change (e.g. source was already 'en' or translation failed)
              app.logger.warning(f"User message translation from '{target_language_simple}' to 'en' did not change the text. Using original for bot.")
-
 
     prompt = f"""You are a helpful medical information assistant for GoMedCamp.
 A patient, {patient_name}, is asking for information.
@@ -1831,17 +1937,16 @@ Assistant: """
     bot_response_en = query_huggingface_model_local(prompt) # This is in English
 
     final_bot_response = bot_response_en
+    # Translate bot's English response back to user's language, if not English
     if target_language_simple != 'en' and bot_response_en and (bot_response_en not in INTERNAL_BOT_ERROR_MESSAGES):
         app.logger.info(f"Attempting to translate bot response from 'en' to '{target_language_simple}'. Original: '{bot_response_en[:100]}...'")
-        # --- UPDATED to use local HF translation ---
         final_bot_response = translate_text_local_hf(bot_response_en, target_language_simple, "en") # target=user's lang, source='en'
-        if final_bot_response == bot_response_en and target_language_simple != "en": 
+        if final_bot_response == bot_response_en: 
             app.logger.warning(f"Translation of bot response from 'en' to '{target_language_simple}' did not change the text. Response was: '{bot_response_en[:100]}...'")
     elif bot_response_en in INTERNAL_BOT_ERROR_MESSAGES:
         app.logger.info(f"Bot response is an internal error message, not translating: {bot_response_en}")
     elif not bot_response_en:
         app.logger.warning("Bot response was empty, not attempting translation.")
-
 
     conn_store_bot = get_db_connection()
     if conn_store_bot:
@@ -1911,9 +2016,7 @@ def patient_feedback():
     finally:
         if conn: conn.close()
 
-# --- NEW Endpoints for Reviews and Follow-ups ---
-
-@app.route('/api/camps', methods=['GET']) # New endpoint for patients to list camps for review
+@app.route('/api/camps', methods=['GET']) 
 def get_all_camps_for_review():
     conn = get_db_connection()
     if not conn: return jsonify({"error": "Database connection failed"}), 500
@@ -1929,7 +2032,7 @@ def get_all_camps_for_review():
     finally:
         if conn: conn.close()
 
-@app.route('/api/reviews', methods=['POST']) # New endpoint for patients to submit reviews
+@app.route('/api/reviews', methods=['POST']) 
 def submit_camp_review():
     patient_user_id_str = request.headers.get('X-User-Id')
     if not patient_user_id_str:
@@ -1962,7 +2065,7 @@ def submit_camp_review():
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute("SELECT user_type FROM users WHERE id = %s", (patient_user_id,))
             user = cur.fetchone()
-            if not user or user['user_type'] != 'requester': # Patients are 'requester' type
+            if not user or user['user_type'] != 'requester': 
                 return jsonify({"error": "Forbidden: Only registered patients (requesters) can submit reviews."}), 403
 
             cur.execute("SELECT id FROM camps WHERE id = %s", (camp_id,))
@@ -1990,7 +2093,7 @@ def submit_camp_review():
     finally:
         if conn: conn.close()
 
-@app.route('/api/camps/<int:camp_id>/reviews', methods=['GET']) # New endpoint for organizers to view reviews
+@app.route('/api/camps/<int:camp_id>/reviews', methods=['GET']) 
 def get_camp_reviews_for_organizer(camp_id):
     organizer_user_id_str = request.headers.get('X-User-Id')
     if not organizer_user_id_str:
@@ -2034,7 +2137,7 @@ def get_camp_reviews_for_organizer(camp_id):
     finally:
         if conn: conn.close()
 
-@app.route('/api/camps/<int:camp_id>/patients/followup', methods=['POST']) # New endpoint for organizers
+@app.route('/api/camps/<int:camp_id>/patients/followup', methods=['POST']) 
 def add_patient_for_followup(camp_id):
     organizer_user_id_str = request.headers.get('X-User-Id')
     if not organizer_user_id_str:
@@ -2093,7 +2196,7 @@ def add_patient_for_followup(camp_id):
     finally:
         if conn: conn.close()
 
-@app.route('/api/camps/<int:camp_id>/patients/followup', methods=['GET']) # New endpoint for organizers
+@app.route('/api/camps/<int:camp_id>/patients/followup', methods=['GET']) 
 def get_camp_followup_patients(camp_id):
     organizer_user_id_str = request.headers.get('X-User-Id')
     if not organizer_user_id_str:
@@ -2136,7 +2239,7 @@ def get_camp_followup_patients(camp_id):
     finally:
         if conn: conn.close()
 
-@app.route('/api/patient/followup-eligibility', methods=['GET']) # New endpoint for patients
+@app.route('/api/patient/followup-eligibility', methods=['GET']) 
 def check_patient_followup_eligibility():
     patient_user_id_str = request.headers.get('X-User-Id')
     if not patient_user_id_str:
@@ -2152,7 +2255,7 @@ def check_patient_followup_eligibility():
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute("SELECT email, phone_number, user_type FROM users WHERE id = %s", (patient_user_id,))
             user = cur.fetchone()
-            if not user or user['user_type'] != 'requester': # Patients are 'requester' type
+            if not user or user['user_type'] != 'requester': 
                 return jsonify({"error": "Forbidden: User not a patient or not found."}), 403
             
             patient_email = user['email']
@@ -2185,26 +2288,38 @@ def check_patient_followup_eligibility():
         return jsonify({"error": "Failed to check follow-up eligibility."}), 500
     finally:
         if conn: conn.close()
-# --- END NEW Endpoints ---
-
 
 @app.route('/')
 def index():
     return "GoMedCamp Backend is running!"
 
 if __name__ == '__main__':
-    log_level = logging.DEBUG if app.debug else logging.INFO
-    if not logging.getLogger().hasHandlers() and not app.logger.handlers:
+    log_level = logging.DEBUG if os.getenv('FLASK_DEBUG') == '1' or app.debug else logging.INFO
+    
+    # Configure root logger if no handlers are present
+    if not logging.getLogger().hasHandlers():
         logging.basicConfig(level=log_level, format='%(asctime)s %(levelname)s: %(name)s: %(message)s [in %(pathname)s:%(lineno)d]')
     
+    # Ensure Flask app logger also uses this level
     app.logger.setLevel(log_level)
+    # If Flask's default handler was added, remove it to avoid duplicate messages if basicConfig also ran
+    if len(app.logger.handlers) > 1 and isinstance(app.logger.handlers[0], logging.StreamHandler):
+        # This check is a bit heuristic; assumes default is a StreamHandler and might need adjustment
+        # A more robust way is to manage handlers explicitly if complex logging is needed
+        pass
+
 
     app.logger.info("Application starting up...")
     if not check_db_env_vars():
         app.logger.critical("Application may not start properly due to missing DB env vars.")
     
-    app.logger.info(f"Expecting indicator JSONs in: {os.path.abspath(BASE_JSON_DIR)}")
-    if not os.path.isdir(BASE_JSON_DIR): app.logger.warning(f"APP_BASE_JSON_DIR ('{os.path.abspath(BASE_JSON_DIR)}') not found.")
+    app.logger.info(f"Expecting indicator JSONs in/from: {os.path.abspath(BASE_JSON_DIR)}")
+    if os.path.isfile(BASE_JSON_DIR) and BASE_JSON_DIR.lower().endswith('.zip'):
+        if not os.path.exists(BASE_JSON_DIR):
+             app.logger.warning(f"APP_BASE_JSON_DIR (ZIP file '{os.path.abspath(BASE_JSON_DIR)}') not found.")
+    elif not os.path.isdir(BASE_JSON_DIR):
+        app.logger.warning(f"APP_BASE_JSON_DIR (directory '{os.path.abspath(BASE_JSON_DIR)}') not found.")
+
     app.logger.info(f"Expecting geographic points CSV at: {os.path.abspath(CSV_POINTS_PATH)}")
     if not os.path.isfile(CSV_POINTS_PATH): app.logger.warning(f"APP_CSV_POINTS_PATH ('{os.path.abspath(CSV_POINTS_PATH)}') not found.")
 
@@ -2222,9 +2337,9 @@ if __name__ == '__main__':
     else:
         app.logger.error(f"Local translation model '{HF_TRANSLATION_MODEL_ID}' FAILED to initialize. Translation functionality will be impaired.")
     
-    # app.logger.info(f"Lingva API URL: {LINGVA_API_URL}") # Lingva no longer used
-
     create_tables() 
     
-    app.logger.info(f"Starting Flask development server on port 5001. Debug mode: {app.debug}")
-    app.run(host='0.0.0.0', port=5001, debug=True)
+    port = int(os.environ.get("PORT", 5001)) # Railway uses PORT env var
+    app.logger.info(f"Starting Flask server on host 0.0.0.0 port {port}. Debug mode: {app.debug}")
+    app.run(host='0.0.0.0', port=port, debug=app.debug)
+
