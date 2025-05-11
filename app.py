@@ -46,7 +46,7 @@ DB_HOST="shuttle.proxy.rlwy.net"
 DB_PORT="21426"
 
 # --- Configuration for Heatmap Data ---
-BASE_JSON_DIR = "https://github.com/Ved-Dixit/GoMedCamp/releases/download/info/json.zip"
+BASE_JSON_DIR = "https://github.com/Ved-Dixit/GoMedCamp/releases/download/v0.1.0-alpha/info_json.zip"
 CSV_POINTS_PATH = "https://github.com/Ved-Dixit/GoMedCamp/releases/download/coordinates/Ind_adm2_Points.csv"
 # --- ADDED CSV Column Environment Variables ---
 ENV_CSV_STATE_COL = os.getenv('APP_CSV_STATE_COL')
