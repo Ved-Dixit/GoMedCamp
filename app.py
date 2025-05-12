@@ -32,16 +32,16 @@ bcrypt = Bcrypt(app)
 CORS(app, resources={r"/api/*": {"origins": "*"}}) # Enable CORS for all /api routes
 
 # Database connection details from environment variables
-DB_NAME=os.getenv("DB_NAME", "railway") # Default to railway, but allow override
-DB_USER=os.getenv("DB_USER", "postgres")
-DB_PASSWORD=os.getenv("DB_PASSWORD", "YugfsjGfbcGvNRVpGtMFlJvsUtCwocba")
-DB_HOST=os.getenv("DB_HOST", "shuttle.proxy.rlwy.net")
-DB_PORT=os.getenv("DB_PORT", "21426")
+DB_NAME=os.getenv("DB_NAME", ) # Default to railway, but allow override
+DB_USER=os.getenv("DB_USER", )
+DB_PASSWORD=os.getenv("DB_PASSWORD", )
+DB_HOST=os.getenv("DB_HOST", )
+DB_PORT=os.getenv("DB_PORT", )
 
 # --- Configuration for Heatmap Data ---
 # These are now URLs by default as per your app.py
-BASE_JSON_DIR = os.getenv('APP_BASE_JSON_DIR', "https://github.com/Ved-Dixit/GoMedCamp/releases/download/v0.1.0-alpha/info_json.zip")
-CSV_POINTS_PATH = os.getenv('APP_CSV_POINTS_PATH', "https://github.com/Ved-Dixit/GoMedCamp/releases/download/coordinates/Ind_adm2_Points.csv")
+BASE_JSON_DIR = os.getenv('APP_BASE_JSON_DIR', )
+CSV_POINTS_PATH = os.getenv('APP_CSV_POINTS_PATH', )
 # --- ADDED CSV Column Environment Variables ---
 ENV_CSV_STATE_COL = os.getenv('APP_CSV_STATE_COL')
 ENV_CSV_DISTRICT_COL = os.getenv('APP_CSV_DISTRICT_COL')
